@@ -65,8 +65,8 @@ def compare_chiphifunc(A, B, fourier_mode=True, simple_mode = True):
         center_content = diff_AB.content[amount_to_trim: -amount_to_trim].copy()
         trimmed_content = diff_AB.content.copy()
         trimmed_content[amount_to_trim: -amount_to_trim] = np.zeros_like(center_content)
-        diff_AB_center = ChiPhiFunc(center_content)
-        diff_AB_trimmed = ChiPhiFunc(trimmed_content)
+        diff_AB_center = ChiPhiFunc(center_content,diff_AB.max_phi_mode)
+        diff_AB_trimmed = ChiPhiFunc(trimmed_content,diff_AB.max_phi_mode)
         print('A and B has different number of components.')
         print('Difference')
         diff_AB_center.display_content(fourier_mode=fourier_mode)
@@ -83,8 +83,8 @@ def compare_chiphifunc(A, B, fourier_mode=True, simple_mode = True):
         raise AttributeError('2 ChiPhiFunc\'s being compared have different'\
         'even/oddness.')
     A_content, B_content = A.stretch_phi_to_match(B)
-    A = ChiPhiFunc(A_content)
-    B = ChiPhiFunc(B_content)
+    A = ChiPhiFunc(A_content, A.max_phi_mode)
+    B = ChiPhiFunc(B_content, B.max_phi_mode)
     shape = (max(A.get_shape()[0], B.get_shape()[0]),max(A.get_shape()[1],B.get_shape()[1]))
     A_content_padded = np.zeros(shape)
     B_content_padded = np.zeros(shape)
@@ -188,40 +188,40 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
 
     # Delta ---------------------------------------
     d0 = np.loadtxt(path+'d0.dat')[:-1]
-    Delta_0 = ChiPhiFunc(np.array([d0]))
+    Delta_0 = ChiPhiFunc(np.array([d0]), 'measure')
 
     d11c = np.loadtxt(path+'d11c.dat')[:-1]
     d11s = np.loadtxt(path+'d11s.dat')[:-1]
     Delta_1 = ChiPhiFunc(np.array([
         d11s,
         d11c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     d20c = np.loadtxt(path+'d20c.dat')[:-1]
     d22c = np.loadtxt(path+'d22c.dat')[:-1]
     d22s = np.loadtxt(path+'d22s.dat')[:-1]
-    Delta_2 = ChiPhiFunc(np.array([d22s, d20c, d22c]), fourier_mode = True)
+    Delta_2 = ChiPhiFunc(np.array([d22s, d20c, d22c]), 'measure', fourier_mode = True)
     Delta_coef_cp = ChiPhiEpsFunc([Delta_0, Delta_1, Delta_2])
 
     # P_perp --------------------------------------
     p0 = np.loadtxt(path+'p0.dat')[:-1]
-    p_perp_0 = ChiPhiFunc(np.array([p0]))
+    p_perp_0 = ChiPhiFunc(np.array([p0]), 'measure')
 
     pc1 = np.loadtxt(path+'pc1.dat')[:-1]
     p_perp_1 = ChiPhiFunc(np.array([
         np.zeros_like(pc1),
         pc1
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     p20c = np.loadtxt(path+'p20c.dat')[:-1]
     p22s = np.loadtxt(path+'p22s.dat')[:-1]
     p22c = np.loadtxt(path+'p22c.dat')[:-1]
-    p_perp_2 = ChiPhiFunc(np.array([p22s,p20c,p22c]), fourier_mode = True)
+    p_perp_2 = ChiPhiFunc(np.array([p22s,p20c,p22c]), 'measure', fourier_mode = True)
     p_perp_coef_cp = ChiPhiEpsFunc([p_perp_0, p_perp_1, p_perp_2])
 
     # B psi ---------------------------------------
     Bp0 = np.loadtxt(path+'Bp0.dat')[:-1]
-    B_psi_0 = ChiPhiFunc(np.array([Bp0]))
+    B_psi_0 = ChiPhiFunc(np.array([Bp0]), 'measure')
 
 
     Bpc11 = np.loadtxt(path+'Bpc11.dat')[:-1]
@@ -229,7 +229,7 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
     B_psi_1 = ChiPhiFunc(np.array([
         Bps11,
         Bpc11
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     B_psi_coef_cp = ChiPhiEpsFunc([B_psi_0, B_psi_1])
 
@@ -237,7 +237,7 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
     Btc20 = np.loadtxt(path+'Btc20.dat')[:-1]
     B_theta_2 = ChiPhiFunc(np.array([
         Btc20
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
     B_theta_coef_cp = ChiPhiEpsFunc([0, 0, B_theta_2])
 
     # X ---------------------------------------
@@ -248,7 +248,7 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
         X22s,
         X20,
         X22c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     X31c = np.loadtxt(path+'X31c.dat')[:-1]
     X31s = np.loadtxt(path+'X31s.dat')[:-1]
@@ -259,13 +259,13 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
         X31s,
         X31c,
         X33c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     Xc1 = np.loadtxt(path+'Xc1.dat')[:-1]
     X1 = ChiPhiFunc(np.array([
         np.zeros_like(Xc1), # sin coeff is zero
         Xc1,
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     X_coef_cp = ChiPhiEpsFunc([0, X1, X2, X3])
 
@@ -277,7 +277,7 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
         Y22s,
         Y20,
         Y22c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     Y31c = np.loadtxt(path+'Y31c.dat')[:-1]
     Y31s = np.loadtxt(path+'Y31s.dat')[:-1]
@@ -288,14 +288,14 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
         Y31s,
         Y31c,
         Y33c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     Ys1 = np.loadtxt(path+'Ys1.dat')[:-1]
     Yc1 = np.loadtxt(path+'Yc1.dat')[:-1]
     Y1 = ChiPhiFunc(np.array([
         Ys1, # sin coeff is zero
         Yc1,
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     Y_coef_cp = ChiPhiEpsFunc([0, Y1, Y2, Y3])
 
@@ -307,7 +307,7 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
         Z22s,
         Z20,
         Z22c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     Z31c = np.loadtxt(path+'Z31c.dat')[:-1]
     Z31s = np.loadtxt(path+'Z31s.dat')[:-1]
@@ -318,7 +318,7 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
         Z31s,
         Z31c,
         Z33c
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
 
     Z_coef_cp = ChiPhiEpsFunc([0, 0, Z2, Z3])
 
@@ -327,20 +327,20 @@ def read_first_three_orders(path, R_array, Z_array, numerical_mode = False):
 
     B_alpha_e = ChiPhiEpsFunc([Ba0, Ba1])
 
-    kap_p = ChiPhiFunc(np.array([np.loadtxt(path+'kappa.dat')[:-1]]))
-    tau_p = ChiPhiFunc(np.array([np.loadtxt(path+'tau.dat')[:-1]]))
+    kap_p = ChiPhiFunc(np.array([np.loadtxt(path+'kappa.dat')[:-1]]), 'measure')
+    tau_p = ChiPhiFunc(np.array([np.loadtxt(path+'tau.dat')[:-1]]), 'measure')
 
     B2 = ChiPhiFunc(np.array([
         [B22s],
         [B20],
         [B22c]
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
     B3 = ChiPhiFunc(np.array([
         [B33s],
         [B31s],
         [B31c],
         [B33c]
-    ]), fourier_mode = True)
+    ]), 'measure', fourier_mode = True)
     # B1 is given by first order jacobian equation, above 14 in the first
     # half of the 2-part paper
     B_denom_coef_c = ChiPhiEpsFunc([1, -X1*2*1*kap_p, B2, B3])

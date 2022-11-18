@@ -12,7 +12,11 @@ import scipy.interpolate
 from joblib import Parallel, delayed
 from functools import lru_cache # import functools for caching
 
-# TODO: Add filtering to dphi?
+# ChiPhiFunc's track the highest phi mode numbers in each term.
+# Setting this to True runs a low-pass filter after each phi
+# derivatives to reduce the accumulation of high frequency noise.
+regularize_phi=False
+regularize_phi_mode_amp_floor = 1e-5
 
 # integrate_chi() should not be run on a ChiPhiFunc with a chi-independent component,
 # because this produces a non-periodic function. However, zero-checking the
@@ -157,7 +161,7 @@ def max_log10(input):
 # ChiPhiFunc is an abstract superclass.
 class ChiPhiFunc:
     # Initializer. Fourier_mode==True converts sin, cos coeffs to exponential
-    def __init__(self, content=np.nan, fourier_mode=False):
+    def __init__(self, content, max_phi_mode, fourier_mode=False):
         if debug_mode:
             debug_max_value.append(np.max(np.abs(content)))
             debug_avg_value.append(np.max(np.average(content)))
@@ -167,13 +171,40 @@ class ChiPhiFunc:
         # for definind special instances that are similar to nan, except yields 0 when *0.
         # copies and force types for numba
         self.content = np.complex128(content)
+        if max_phi_mode == 'measure':
+            max_phi_mode = ChiPhiFunc.measure_regularity(content)
+        elif not np.isscalar(max_phi_mode):
+            raise TypeError('ChiPhiFunc max_phi_mode must be a scalar.')
+        elif max_phi_mode<0:
+            raise ValueError('ChiPhiFunc max_phi_mode must be >0. Value given '\
+            'is '+str(max_phi_mode))
+        self.max_phi_mode = max_phi_mode
         if fourier_mode:
             self.trig_to_exp()
+
+    def edit_max_phi_mode(self,max_phi_mode):
+        self.max_phi_mode = max_phi_mode
+        return(self)
+
+    def measure_regularity(content):
+        len_phi = content.shape[1]
+        W = np.abs(np.fft.fftfreq(len_phi))
+        f_signal = np.fft.fft(content, axis = 1) # fft and measure amplitude
+        f_signal_flattened = np.amax(f_signal, axis=0) # flatten to 1d
+        # Measure the highest phi mode number with amplitude
+        # greater than regularize_phi_mode_amp_floor
+        W[f_signal_flattened<regularize_phi_mode_amp_floor] = 0
+        max_freq = np.max(np.abs(W))*len_phi # *len_phi converts to hz
+        return(max_freq)
+
+    def measure_and_set_regularity(self):
+        ChiPhiFunc.measure_regularity(self.content)
+        return(self.edit_max_phi_mode(max_freq))
 
     ''' I.1.1 Operators '''
     # -self (negative) operator.
     def __neg__(self):
-        return type(self)(-self.content)
+        return ChiPhiFunc(-self.content, self.max_phi_mode)
 
     # self+other, with:
     # a scalar or another ChiPhiFunc of the same implementation
@@ -240,42 +271,46 @@ class ChiPhiFunc:
                 raise TypeError('* cannnot be evaluated with a vector.')
             if other == 0: # to accomodate ChiPhiFuncNull.
                 return(0)
-            return(type(self)(other * self.content))
+            return(ChiPhiFunc(other * self.content, self.max_phi_mode))
 
     # self*other
     def __rmul__(self, other):
         return(self*other)
 
+    # self/scalar.
     def __truediv__(self, other):
         # When summing two ChiPhiFunc's, only allows summation
         # of the same implementation (fourier or grid)
         if isinstance(other, ChiPhiFuncNull):
             return(other)
         if isinstance(other, ChiPhiFunc):
-            if other.content.shape[0]!=1:
-                raise TypeError('/ can only be evaluated with a'\
-                                    'ChiPhiFuncs with no chi dependence (only 1 row)')
-            return(self.multiply(other, div=True))
+            raise TypeError('/ChiPhiFunc is discouraged. Use reg_div(a, b) instead.')
+            # if other.content.shape[0]!=1:
+            #     raise TypeError('/ can only be evaluated with a'\
+            #                         'ChiPhiFuncs with no chi dependence (only 1 row)')
+            # return(self.multiply(other, div=True))
         else:
             if not np.isscalar(other):
                 raise TypeError('/ cannnot be evaluated with a vector.')
-            return(type(self)(self.content/other))
+            return(ChiPhiFunc(self.content/other, self.max_phi_mode))
 
     # other/self
     def __rtruediv__(self, other):
-        if self.content.shape[0]!=1:
-            raise TypeError('/ can only be evaluated with a'\
-                            'ChiPhiFuncs with no chi dependence (only 1 row)')
-        if isinstance(other, ChiPhiFunc):
-            return(other.multiply(self, div=True))
-        else:
-            if not np.isscalar(other):
-                raise TypeError('/ cannnot be evaluated with a vector.')
-            return(type(self)(other/self.content))
+        raise TypeError('/ChiPhiFunc is discouraged. Use reg_div(a, b) instead.')
+        # if self.content.shape[0]!=1:
+        #     raise TypeError('/ can only be evaluated with a'\
+        #                     'ChiPhiFuncs with no chi dependence (only 1 row)')
+        # if isinstance(other, ChiPhiFunc):
+        #     return(other.multiply(self, div=True))
+        # else:
+        #     if not np.isscalar(other):
+        #         raise TypeError('/ cannnot be evaluated with a vector.')
+        #         # TODO_LATER!!!!
+        #     return(ChiPhiFunc(other/self.content, np.inf))
 
     # other@self, for treating this object as a vector of Chi modes, and multiplying with a matrix
     def __rmatmul__(self, mat):
-        return type(self)(mat @ self.content)
+        return ChiPhiFunc(mat @ self.content,self.max_phi_mode)
 
     # self@other, not supported. Throws an error.
     def __matmul__(self, mat):
@@ -293,7 +328,28 @@ class ChiPhiFunc:
             return(1)
         if other < 1:
             raise ValueError('**\'s other argument must be non-negative.')
-        return ChiPhiFunc(ChiPhiFunc.pow_jit(self.content, other))
+        return ChiPhiFunc(ChiPhiFunc.pow_jit(self.content, other), self.max_phi_mode**other)
+
+    # Used to divide anything with a ChiPhiFunc with no chi dependence.
+    # Since by the form of recursion relations, a/b=x only appears
+    # to find x satisfying bx=a, where a is composed of Cauchy products,
+    # and bx is the highest order term drawn from the Cauchy product,
+    # the max phi mode of x will be assumed to be ma-mb.
+    def reg_div(a, b):
+        if isinstance(a, ChiPhiFunc) and isinstance(b, ChiPhiFunc):
+            if b.content.shape[0]!=1:
+                raise TypeError('reg_div can only be evaluated with a'\
+                                'ChiPhiFuncs with no chi dependence (only 1 row)')
+            return(a.multiply(b, div=True).regularize_internal())
+        else:
+            raise TypeError('reg_div can only be evaluated between two'\
+                            'ChiPhiFuncs.')
+            # if not np.isscalar(other):
+            #     raise TypeError('/ cannnot be evaluated with a vector.')
+            #     # TODO_LATER!!!!
+            # return(ChiPhiFunc(other/self.content, np.inf))
+
+
 
     # Used in operator * and /. First stretch the phi axis to match grid locations,
     # Then do pointwise product.
@@ -301,12 +357,16 @@ class ChiPhiFunc:
     # -- Output: a new ChiPhiFunc
     @lru_cache(maxsize=1000)
     def multiply(self, other, div = False):
+        div_sign = 1
         a, b = self.stretch_phi_to_match(other)
         if div:
+            warnings.warn('Warning: /chiphifunc\'s regularity not done yet')
             b = 1.0/b
+            div_sign = -1
+
         # Now both are stretch to be dim (n_a, n_phi), (n_b, n_phi).
         # Transpose and 1d convolve all constituents.
-        return(ChiPhiFunc(mul_grid_jit(a, b)))
+        return(ChiPhiFunc(mul_grid_jit(a, b), self.max_phi_mode+div_sign*other.max_phi_mode))
 
     # Addition of 2 ChiPhiFunc's.
     # Wrapper for numba method.
@@ -317,7 +377,7 @@ class ChiPhiFunc:
         # Now that grid points are matched by stretch_phi, we can invoke add_jit()
         # To add matching rows(chi coeffs) and grid points.
 
-        return ChiPhiFunc(ChiPhiFunc.add_jit(a,b,sign))
+        return ChiPhiFunc(ChiPhiFunc.add_jit(a,b,sign), max(self.max_phi_mode,other.max_phi_mode))
 
     # Addition of a constant with a ChiPhiFunc.
     # Wrapper for numba method.
@@ -332,7 +392,10 @@ class ChiPhiFunc:
                 print(const)
                 raise ValueError('A constant + with an even series. ')
         stretched_constant = np.full((1, self.get_shape()[1]), const, dtype=np.complex128)
-        return ChiPhiFunc(ChiPhiFunc.add_jit(self.content, stretched_constant,sign))
+        return ChiPhiFunc(
+            ChiPhiFunc.add_jit(self.content, stretched_constant,sign),
+            self.max_phi_mode
+        )
 
     ''' I.1.2 Derivatives, integrals and related methods '''
     # derivatives. Implemented through dchi_op
@@ -343,11 +406,11 @@ class ChiPhiFunc:
             raise AttributeError('dchi order must be positive')
         mode_i = (1j*np.arange(-len_chi+1,len_chi+1,2)[:,None])**order
         out = mode_i * out
-        return(type(self)(out))
+        return(ChiPhiFunc(out, self.max_phi_mode))
 
     def integrate_chi(self, ignore_mode_0=False):
         len_chi = self.get_shape()[0]
-        temp = np.arange(-len_chi+1,len_chi+1,2,dtype=np.float32)[:,None]
+        temp = 1j*np.arange(-len_chi+1,len_chi+1,2)[:,None]
         if len_chi%2==1:
             temp[len(temp)//2]=np.inf
             if np.max(np.abs(self.content[len_chi//2]))>noise_level_int\
@@ -355,22 +418,25 @@ class ChiPhiFunc:
                 raise ValueError('Integrand has a significant chi-independent '\
                 'component!')
 
-        mode_i = -1j/temp
-        return(type(self)(mode_i * self.content))
+        mode_i = 1/temp
+        return(ChiPhiFunc(mode_i * self.content, self.max_phi_mode))
 
     # NOTE: will not be passed items awaiting for conditions.
     def dphi(self, order=1, mode='default'):
-        return(ChiPhiFunc(dphi_direct(self.content, order=order, mode=mode)))
+        return(ChiPhiFunc(
+        dphi_direct(self.content, order=order, mode=mode),
+        self.max_phi_mode
+        ).regularize_internal())
 
     def dphi_iota_dchi(self, iota):
         return(self.dphi()+iota*self.dchi())
 
     # Used to calculate e**(ChiPhiFunc). Only support ChiPhiFunc with no
-    # chi dependence
+    # chi dependence.
     def exp(self):
         if self.get_shape()[0]!=1:
             raise ValueError('exp only supports ChiPhiFunc with no chi dependence!')
-        return(ChiPhiFunc(np.exp(self.content)))
+        return(ChiPhiFunc(np.exp(self.content), np.nan))
 
     # Used for solvability condition. phi-integrate a ChiPhiFunc over 0 to
     # 2pi or 0 to a given phi. The boundary condition output(phi=0) = 0 is enforced.
@@ -403,7 +469,10 @@ class ChiPhiFunc:
             out_list = Parallel(n_jobs=n_jobs, backend=backend, require=require)(
                 delayed(integral)(i_chi) for i_chi in range(len(self.content))
             )
-            return(ChiPhiFunc(np.array(out_list)))
+            # This is min because it's a filtering operation, not addition of
+            # two signals. If the original has higher than niquist freq then the
+            # the the freq is capped at the niquist freq.
+            return(ChiPhiFunc(np.array(out_list), min(self.max_phi_mode, len_phi/2)).regularize_internal())
 
         elif mode == 'simpson':
             new_content = integrate_phi_simpson(self.content, periodic = periodic)
@@ -414,7 +483,10 @@ class ChiPhiFunc:
 
         if new_content.shape == (1,1):
             return(new_content[0,0])
-        return(ChiPhiFunc(new_content))
+        max_phi_mode = self.max_phi_mode
+        if periodic:
+            max_phi_mode = 0
+        return(ChiPhiFunc(new_content, max_phi_mode).regularize_internal())
 
     # Compares if self and other both have even or odd chi series.
     def both_even_odd(self,other):
@@ -431,11 +503,26 @@ class ChiPhiFunc:
             content = self.content
             a = np.roll(content, -1, axis=1)
             b = np.roll(content, 1, axis=1)
-            return(ChiPhiFunc(0.5*content+0.25*a+0.25*b))
+            return(ChiPhiFunc(
+                0.5*content+0.25*a+0.25*b,
+                min(self.max_phi_mode, self.get_shape[1]/2)
+            ))
         elif mode == 'low_pass':
-            return(ChiPhiFunc(low_pass_direct(self.content, arg)))
+            return(ChiPhiFunc(low_pass_direct(self.content, arg), self.max_phi_mode))
         else:
             raise AttributeError('ChiPhiFunc.filter: mode not recognized.')
+
+    # Cut the phi spectrum in self.content down to +- self.max_phi_mode
+    # with the low-pass filter. Possible because of phi regularity.
+    def regularize(self):
+        self.content = low_pass_direct(self.content, self.max_phi_mode)
+        return(self)
+
+    # Run regularize() if regularize_phi=True.
+    def regularize_internal(self):
+        if regularize_phi:
+            self = self.regularize()
+        return(self)
 
     def noise_filter(self, mode='low_pass', arg=low_pass_freq):
         return(self-self.filter(mode=mode, arg=arg))
@@ -451,14 +538,14 @@ class ChiPhiFunc:
         len_chi = self.get_shape()[0]
         if len_chi%2!=1:
             raise ValueError('No constant component found.')
-        return(type(self)(np.array([self.content[len_chi//2]])))
+        return(ChiPhiFunc(np.array([self.content[len_chi//2]]), self.max_phi_mode))
 
     # Returns the value when phi=0. Copies.
     def get_phi_zero(self):
         new_content = np.array([self.content[:,0]]).T
         if len(new_content) == 1:
             return(new_content[0][0])
-        return(ChiPhiFunc(np.array([self.content[:,0]]).T))
+        return(ChiPhiFunc(np.array([self.content[:,0]]).T, 0)) # Returns phi-indep
 
     # Mask the constant component with zero. Copies.
     def zero_mask_constant(self):
@@ -471,7 +558,7 @@ class ChiPhiFunc:
             raise AttributeError('zero_mask_constant: only applicable to even n.')
         new_content = self.content.copy()
         new_content[self.get_shape()[0]//2] = array
-        return(type(self)(new_content))
+        return(ChiPhiFunc(new_content, TODO_LATER))
 
     # Used in addition with constant. Only even chi series has constant component.
     # Odd chi series + constant results in error.
@@ -493,7 +580,7 @@ class ChiPhiFunc:
         Yn1_s = np.array([(Yn1_pos-Yn1_neg)*1j])
         Yn1_c = np.array([Yn1_pos+Yn1_neg])
 
-        return(type(self)(Yn1_s), type(self)(Yn1_c))
+        return(ChiPhiFunc(Yn1_s, self.max_phi_mode), ChiPhiFunc(Yn1_c, self.max_phi_mode))
 
     # Takes the center m+1 rows of content.
     def cap_m(self, m):
@@ -505,7 +592,7 @@ class ChiPhiFunc:
         if num_clip%2 != 0:
             raise AttributeError('cap_mode only works when input and '\
             'self.content are both even or odd.')
-        return(type(self)(self.content[num_clip//2:-num_clip//2]))
+        return(ChiPhiFunc(self.content[num_clip//2:-num_clip//2], self.max_phi_mode))
 
     ''' I.1.5 Output and plotting '''
     # Get a 2d vectorized function for plotting this term
@@ -590,7 +677,7 @@ class ChiPhiFunc:
 
     # FFT the content and returns a ChiPhiFunc
     def get_spectrum(self):
-        return(ChiPhiFunc(np.fft.fft(self.content, axis=1)))
+        return(ChiPhiFunc(np.fft.fft(self.content, axis=1), np.nan))
 
     # Plot a period in both chi and phi
     def display(self, complex = False, size=(100,100), avg_clim = False):
@@ -750,7 +837,7 @@ class ChiPhiFunc:
     def export_trig(self):
         util_matrix_chi = np.linalg.inv(self.fourier_to_exp_op())
         # Apply the conversion matrix on chi axis
-        return(type(self)(util_matrix_chi @ self.content))
+        return(ChiPhiFunc(util_matrix_chi @ self.content, self.max_phi_mode))
 
     # Generates a matrix for converting a n-dim trig-fourier-representation vector (can be full or skip)
     # into exponential-fourier-representation.
@@ -843,7 +930,12 @@ class ChiPhiFunc:
                 vai_content, ignore_extra=ignore_extra
             )
 
-        return(ChiPhiFunc(va_content))
+        return(
+            ChiPhiFunc(
+                va_content,
+                v_rhs.max_phi_mode - np.max(v_source_A.max_phi_mode, v_source_B.max_phi_mode)
+            )
+        )
 
     # Solve exactly determined degenerate system equivalent to
     # v_source_A(chi, phi) * va_{n}(chi, phi) = v_rhs{n}(chi, phi).
@@ -877,7 +969,7 @@ class ChiPhiFunc:
             v_rhs.content,
             rank_rhs
         )
-        return(ChiPhiFunc(va_content))
+        return(ChiPhiFunc(va_content, v_rhs.max_phi_mode-v_source_A.max_phi_mode))
 
 ''' I.2 Utilities '''
 # Integrates a function on a grid using Simpson's method.
@@ -1085,6 +1177,9 @@ class ChiPhiFuncNull(ChiPhiFunc):
         return(self)
 
     def dphi(self, order=1):
+        return(self)
+
+    def regularize(self):
         return(self)
 
 ''' III. Grid 1D deconvolution (used for "dividing" a chi-dependent quantity)'''
@@ -1441,7 +1536,9 @@ def batch_degen_jit(v_source_A, v_rhs, rank_rhs):
 # Solves simple linear first order ODE systems in batch:
 # (coeff + coeff_phi d/dphi) y = f. ( y' + p_eff*y = f_eff )
 # (Dchi = +- m * 1j)
-# All inputs are content matrices.
+# All inputs are scalars or CONTENT ARRAYS. This is a backend that
+# solves linear ode in batches, not something that acts on ChiPhiFunc's.
+
 # p and f are assumed periodic.
 # P is preferrably non-resonant for small p amplitude.
 # All coeffs' CONTENTS are point-wise multiplied to f, dpf or dcf's content.
@@ -1471,8 +1568,12 @@ def batch_degen_jit(v_source_A, v_rhs, rank_rhs):
 # truncation will be used instead.# a dphi operator acting on the fft of
 # a content along axis=1
 # Initial condition for y
-def solve_integration_factor(coeff, coeff_dp, f, \
+def solve_integration_factor(coeff_in, coeff_dp_in, f_in, \
+    lhs_coeff_mode, f_phi_mode,
     integral_mode='auto', asymptotic_order=asymptotic_order, masking = True):
+
+    max_phi_mode = f_phi_mode-lhs_coeff_mode
+    f = f_in.content
 
     len_phi = f.shape[1]
     len_chi = f.shape[0]
@@ -1524,7 +1625,7 @@ def solve_integration_factor(coeff, coeff_dp, f, \
                 delayed(solve_1d)(p_eff[i], 1, f_eff[i], modes[i])\
                 for i in range(len_chi)
             )
-            return(np.array(out_list)[:,0,:]*f_eff_scaling)
+            return((np.array(out_list)[:,0,:]*f_eff_scaling).edit_max_phi_mode(max_phi_mode))
         # Batch solve the whole group of equations
         # with asymptotic series if all of them has large amplitudes
         integral_mode = modes[0]
@@ -1536,7 +1637,7 @@ def solve_integration_factor(coeff, coeff_dp, f, \
         for i in range(asymptotic_order):
             # ai is periodic. We use the non-looped value to ensure
             # that dphi by fft functions correctly
-            ai_new = -(ChiPhiFunc(ai).dphi().content)/p_eff
+            ai_new = -(ChiPhiFunc(ai,np.nan).dphi().content)/p_eff
             if np.max(np.abs(ai_new)) > np.max(np.abs(ai)):
                 print('Optimum truncation at order', i+1)
                 print('Amplitude of the truncation term:', np.amax(np.abs(ai), axis = 1))
@@ -1544,7 +1645,7 @@ def solve_integration_factor(coeff, coeff_dp, f, \
             ai = ai_new
             integration_factor += ai
         # No longer outputs the truncation term for error tracking
-        return(integration_factor*f_eff_scaling) # , np.amax(np.abs(ai), axis = 1)*f_eff_scaling)
+        return((integration_factor*f_eff_scaling).edit_max_phi_mode(max_phi_mode)) # , np.amax(np.abs(ai), axis = 1)*f_eff_scaling)
 
     elif integral_mode == 'double_spline':
         # asymptotic_y, error = solve_integration_factor(coeff, coeff_dp, f, \
@@ -1613,7 +1714,7 @@ def solve_integration_factor(coeff, coeff_dp, f, \
         #     A = optimized.x
         #     out[i] = ((A[0]+1j*A[1])*exp_negphi_double[i]+int_factor_over_I_double[i])[:len_phi]
 
-        return(out*f_eff_scaling)
+        return((out*f_eff_scaling).edit_max_phi_mode(max_phi_mode))
 
     elif integral_mode == 'fft':
         p_fft = np.fft.fft(p_eff, axis = 1)
@@ -1623,7 +1724,7 @@ def solve_integration_factor(coeff, coeff_dp, f, \
         inv_dxpp = np.linalg.inv(diff_matrix[None, :, :] + conv_matrix)
         sln_fft = (inv_dxpp@f_fft[:,:,None])[:,:,0]
         sln = np.fft.ifft(sln_fft, axis = 1)
-        return(sln*f_eff_scaling)
+        return((sln*f_eff_scaling).edit_max_phi_mode(max_phi_mode))
 
     else:
         f_looped = wrap_grid_content_jit(f_eff)
@@ -1671,7 +1772,7 @@ def solve_integration_factor(coeff, coeff_dp, f, \
             c1=integration_factor_2pi/(1-exp_neg2pi)
         out = c1*exp_negphi+integration_factor
         out = out[:,:-1]
-        return(out*f_eff_scaling)
+        return((out*f_eff_scaling).edit_max_phi_mode(max_phi_mode))
 
 # a dphi operator acting on the fft of
 # a content along axis=1
@@ -1711,6 +1812,7 @@ def fft_conv_op_batch(source):
 # -- Output --
 # y is a ChiPhiFunc's content
 def solve_integration_factor_chi(coeff, coeff_dp, coeff_dc, f, \
+    lhs_coeff_mode, f_phi_mode,
     integral_mode=non_periodic_integral_mode, asymptotic_order=asymptotic_order):
 
     len_chi = f.shape[0]
@@ -1725,6 +1827,7 @@ def solve_integration_factor_chi(coeff, coeff_dp, coeff_dc, f, \
 
     return(
         solve_integration_factor(coeff_eff, 1, f_eff, \
+            lhs_coeff_mode, f_phi_mode,
             integral_mode=integral_mode,
             asymptotic_order=asymptotic_order)
     )
@@ -1737,10 +1840,12 @@ def solve_integration_factor_chi(coeff, coeff_dp, coeff_dc, f, \
 # dphi y0 = f0.
 # -- Output --
 # y is a ChiPhiFunc's content
-def solve_dphi_iota_dchi(iota, f, \
+def solve_dphi_iota_dchi(iota, f,
+    f_phi_mode,
     integral_mode=non_periodic_integral_mode, asymptotic_order=asymptotic_order):
     return(
-        solve_integration_factor_chi(0, 1, iota, f, \
+        solve_integration_factor_chi(0, 1, iota, f,
+            0, f_phi_mode,
             integral_mode=integral_mode,
             asymptotic_order=asymptotic_order)
         )

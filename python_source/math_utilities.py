@@ -109,3 +109,6 @@ def int_chi(y):
         return(0)
     else:
         raise TypeError('Illegal int_chi argument: ' + str(y))
+
+def reg_div(a, b):
+    return(chiphifunc.ChiPhiFunc.reg_div(a, b))

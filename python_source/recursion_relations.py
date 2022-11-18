@@ -1,5 +1,5 @@
 # Wrapped/completed recursion relations based on translated expressions
-# in parsed/. Necessary masking and/or n-substitution are included. All iterate_*
+# in MHD_parsed/. Necessary masking and/or n-substitution are included. All iterate_*
 # methods returns ChiPhiFunc's.
 
 # ChiPhiFunc and ChiPhiEpsFunc
@@ -8,8 +8,8 @@ from chiphiepsfunc import *
 from math_utilities import *
 import numpy as np
 
-# parsed relations
-import parsed
+# MHD_parsed relations
+import MHD_parsed
 
 # Performance
 import time
@@ -31,7 +31,7 @@ def iterate_Xn_cp(n_eval,
     B_alpha_coef,
     kap_p, dl_p, tau_p,
     iota_coef):
-    return(parsed.eval_xn.eval_Xn_cp(
+    return(MHD_parsed.eval_xn.eval_Xn_cp(
         n=n_eval,
         X_coef_cp=X_coef_cp.mask(n_eval-1).zero_append(),
         Y_coef_cp=Y_coef_cp.mask(n_eval-1),
@@ -60,12 +60,12 @@ def iterate_Yn_cp(n_eval,
     # Getting coeffs
     # Both uses B_alpha0 and X1 only
 
-    coef_a = parsed.eval_ynp1.coef_a(n_eval-1, B_alpha_coef, X_coef_cp)
-    coef_b = parsed.eval_ynp1.coef_b(B_alpha_coef, X_coef_cp)
+    coef_a = MHD_parsed.eval_ynp1.coef_a(n_eval-1, B_alpha_coef, X_coef_cp)
+    coef_b = MHD_parsed.eval_ynp1.coef_b(B_alpha_coef, X_coef_cp)
 
     # Getting rhs-lhs
     # for Yn to work, "n" must be subbed with n-1 here
-    ynp1_rhsmlhs = parsed.eval_ynp1.rhs_minus_lhs(n_eval-1,
+    ynp1_rhsmlhs = MHD_parsed.eval_ynp1.rhs_minus_lhs(n_eval-1,
         X_coef_cp,
         Y_coef_cp.mask(n_eval-1).zero_append(),
         Z_coef_cp,
@@ -110,7 +110,7 @@ def iterate_iota_nm1b2(n,
 
     # Note: mask n leaves nth-order as the last order in.
     # Xi requires Yn, Zn+1=0. This means mask(n-1) and mask(n)
-    Xi_n_p = parsed.eval_full_xi_n.eval_full_Xi_n_p(
+    Xi_n_p = MHD_parsed.eval_full_xi_n.eval_full_Xi_n_p(
         n, X_coef_cp, Y_coef_cp.mask(n-1).zero_append(), Z_coef_cp.mask(n).zero_append(), \
         kap_p, dl_p, tau_p, iota_coef.mask((n-1)//2-1).zero_append()).get_constant()
     iota_0 = iota_coef[0]
@@ -161,7 +161,7 @@ def iterate_Zn_cp(
     B_alpha_coef,
     kap_p, dl_p, tau_p,
     iota_coef):
-    return(parsed.eval_znp1.eval_Zn_cp(
+    return(MHD_parsed.eval_znp1.eval_Zn_cp(
         n=n_eval,
         X_coef_cp=X_coef_cp.mask(n_eval-1),
         Y_coef_cp=Y_coef_cp.mask(n_eval-1),
@@ -180,7 +180,7 @@ def iterate_Yn1c_p(n, X_coef_cp, Y_coef_cp, Z_coef_cp,\
                   B_denom_coef_c, B_alpha_coef,
                   B_psi_coef_cp, B_theta_coef_cp, B_theta_np10):
 
-    Yn1s_p = parsed.evaluate_ynp1s1_full(n-1,
+    Yn1s_p = MHD_parsed.evaluate_ynp1s1_full(n-1,
     X_coef_cp,
     Y_coef_cp.mask(n-1).zero_append(),
     Z_coef_cp,
@@ -197,10 +197,10 @@ def iterate_Yn1c_p(n, X_coef_cp, Y_coef_cp, Z_coef_cp,\
     _, X11c_p = X_coef_cp[1].get_Yn1s_Yn1c()
 
     # Note the difference with iota_nm1b2: iota(n-1)//2=0 is no longer applied here.
-    Xi_n_p_no_iota_mask = parsed.eval_full_Xi_n_p(
+    Xi_n_p_no_iota_mask = MHD_parsed.eval_full_Xi_n_p(
         n, X_coef_cp, Y_coef_cp.mask(n-1).zero_append(), Z_coef_cp.mask(n).zero_append(), \
         kap_p, dl_p, tau_p, iota_coef).get_constant()
-    Xi_n_p = parsed.eval_full_Xi_n_p(
+    Xi_n_p = MHD_parsed.eval_full_Xi_n_p(
         n, X_coef_cp, Y_coef_cp.mask(n-1).zero_append(), Z_coef_cp.mask(n).zero_append(), \
         kap_p, dl_p, tau_p, iota_coef.mask((n-1)//2-1).zero_append()).get_constant()
 
@@ -262,7 +262,7 @@ def iterate_dc_B_psi_nm2(
     B_alpha_coef, B_denom_coef_c,
     kap_p, dl_p, tau_p,
     iota_coef):
-    dchi_b_psi_nm2 = parsed.eval_dchi_b_psi_nm2.eval_dchi_B_psi_cp_nm2(n_eval, \
+    dchi_b_psi_nm2 = MHD_parsed.eval_dchi_b_psi_nm2.eval_dchi_B_psi_cp_nm2(n_eval, \
         X_coef_cp.mask(n_eval-1).zero_append(), \
         Y_coef_cp.mask(n_eval-1).zero_append(), \
         Z_coef_cp.mask(n_eval-1).zero_append(), \
@@ -288,7 +288,7 @@ def iterate_p_perp_n(n_eval,
     Delta_coef_cp,
     iota_coef):
     return(
-        parsed.eval_p_perp_n.eval_p_perp_n_cp(n_eval,
+        MHD_parsed.eval_p_perp_n.eval_p_perp_n_cp(n_eval,
         B_theta_coef_cp.mask(n_eval-2).zero_append().zero_append(), # cancellation for 2 orders
         B_psi_coef_cp,
         B_alpha_coef,
@@ -306,13 +306,13 @@ def iterate_delta_n(n_eval,
     p_perp_coef_cp,
     Delta_coef_cp,
     iota_coef):
-    Delta_n_inhomog_component = parsed.eval_delta_n.eval_inhomogenous_Delta_n_cp(n_eval,
+    Delta_n_inhomog_component = MHD_parsed.eval_delta_n.eval_inhomogenous_Delta_n_cp(n_eval,
     B_denom_coef_c,
     p_perp_coef_cp,
     Delta_coef_cp.mask(n_eval-1).zero_append(),
     iota_coef)
 
-    content = solve_dphi_iota_dchi(iota_coef[0], Delta_n_inhomog_component.content)
+    content = solve_dphi_iota_dchi(iota_coef[0], Delta_n_inhomog_component)
     return(
         ChiPhiFunc(content).cap_m(n_eval)
     )
