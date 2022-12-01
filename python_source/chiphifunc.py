@@ -12,8 +12,14 @@ import scipy.interpolate
 from joblib import Parallel, delayed
 from functools import lru_cache # import functools for caching
 
-# TODO: Add filtering to dphi?
+# When True, throws error if a content array contains nan
+# during the initialization of a ChiPhiFunc
+check_nan_content = True
 
+# Filtering need to be used with caution since there's no explicit regularity
+# constraint for phi dependence.
+
+# For error throwing.
 # integrate_chi() should not be run on a ChiPhiFunc with a chi-independent component,
 # because this produces a non-periodic function. However, zero-checking the
 # component is not feasible, because cancellation is often not exact in numerical
@@ -36,7 +42,7 @@ low_pass_freq=50
 # Default diff and integration modes can be modified.
 diff_mode = 'pseudo_spectral' # available: pseudo_spectral, finite_difference, fft, spline
 integral_mode = 'fft' # available: spline, simpson, fft
-non_periodic_integral_mode = 'spline' # available: spline, simpson, fft
+two_pi_integral_mode = 'simpson' # available: spline, simpson, fft
 
 # Threshold for p amplitude to use asymptotic expansion for y'+py=f
 asymptotic_threshold = 30
@@ -166,6 +172,9 @@ class ChiPhiFunc:
             raise ValueError('ChiPhiFunc content must be 2d arrays.')
         # for definind special instances that are similar to nan, except yields 0 when *0.
         # copies and force types for numba
+        if check_nan_content:
+            if np.any(np.isnan(content)):
+                raise ValueError('ChiPhiFunc content contains nan element!')
         self.content = np.complex128(content)
         if fourier_mode:
             self.trig_to_exp()
@@ -391,11 +400,13 @@ class ChiPhiFunc:
         phis = np.linspace(0, 2*np.pi*(1-1/len_phi), len_phi, dtype=np.complex128)
         if mode == 'default':
             if periodic:
-                mode = non_periodic_integral_mode
+                mode = two_pi_integral_mode
             else:
                 mode = integral_mode
 
         if mode == 'fft':
+            if periodic:
+                raise AttributeError('It is not advised to integrate over 2pi with spectral method.')
             def integral(i_chi):
                 out = scipy.fftpack.diff(self.content[i_chi], order=-1)
                 out = out - out[0] # Enforces zero at phi=0 boundary condition.
@@ -780,6 +791,7 @@ class ChiPhiFunc:
     # v_source_A(chi, phi) * va_{n+1}(chi, phi) = v_rhs{n}(chi, phi).
     # When Y_mode=True, solves
     # wrapper for jit-enabled method batch_underdetermined_degen_jit.
+    # Necessary because the equation for Yn's outmost components exactly cancel.
     # -- Input --
     # v_source_A, v_rhs: ChiPhiFunc,
     # rank_rhs: int, 'n' in the equation above
@@ -849,14 +861,19 @@ class ChiPhiFunc:
     # v_source_A(chi, phi) * va_{n}(chi, phi) = v_rhs{n}(chi, phi).
     # You can also think of this as "/" with chi-dependent "other" argument.
     # wrapper for jit-enabled method batch_degen_jit.
-    def solve_degen(v_source_A, v_rhs, rank_rhs):
+    def solve_degen(v_source_A, v_source_B, v_rhs, rank_rhs):
 
         # checking input types
         if type(v_source_A) is not ChiPhiFunc\
+            or type(v_source_B) is not ChiPhiFunc\
             or type(v_rhs) is not ChiPhiFunc:
             raise TypeError('ChiPhiFunc.solve_underdetermined: '\
                             'v_source_A, v_rhs, vai should all be ChiPhiFunc.')
 
+
+        v_source_A_content = v_source_A.content
+        v_source_B_content = v_source_B.content
+        v_rhs_content = v_rhs.content
         if v_source_A.get_shape()[0] + rank_rhs - 1 != v_rhs.get_shape()[0]:
             print("v_source_A shape:", v_source_A.get_shape())
             print("v_rhs shape:", v_rhs.get_shape())
@@ -867,13 +884,13 @@ class ChiPhiFunc:
             # LHS and RHS's even and oddness.
             v_rhs_content = ChiPhiFunc.add_jit(
                 v_rhs_content,
-                np.zeros((v_source_A.get_shape()[0]+rank_rhs-1, v_rhs.get_shape()[1]), dtype=np.complex128)
+                np.zeros((v_source_A.get_shape()[0]+rank_rhs-1, v_rhs.get_shape()[1]), dtype=np.complex128),
+                1
             )
-        v_source_A_content = v_source_A.content
-        v_rhs_content = v_rhs.content
 
         va_content = batch_degen_jit(
             v_source_A.content,
+            v_source_B.content,
             v_rhs.content,
             rank_rhs
         )
@@ -893,7 +910,6 @@ class ChiPhiFunc:
 # NOTE
 # Cell values are ALWAYS taken at the left edge.
 def integrate_phi_simpson(content, dx = 'default', periodic = False):
-    print('simpson')
     len_chi = content.shape[0]
     len_phi = content.shape[1]
     if dx == 'include_2pi':
@@ -934,10 +950,10 @@ def integrate_phi_spline(content, dx = 'default', periodic=False,
         dx = 2*np.pi/len_phi
         # purely real.
 
-    phi = np.linspace(0, dx*(len_phi-1), len_phi)
+    phis = np.linspace(0, dx*(len_phi-1), len_phi)
 
     def generate_and_integrate_spline(i_chi):
-        new_spline = scipy.interpolate.make_interp_spline(phi, content[i_chi])
+        new_spline = scipy.interpolate.make_interp_spline(phis, content[i_chi])
         if diff:
             return(scipy.interpolate.splder(new_spline, n=diff_order))
         return(scipy.interpolate.splantider(new_spline))
@@ -960,9 +976,9 @@ def integrate_phi_spline(content, dx = 'default', periodic=False,
         )
         return(np.array([out_list]).T)
     else:
-        evaluate_spline = lambda spline, phi : spline(phi)
+        evaluate_spline = lambda spline, phis : spline(phis)
         out_list = Parallel(n_jobs=n_jobs, backend=backend, require=require)(
-            delayed(evaluate_spline)(spline, phi) for spline in integrate_spline_list
+            delayed(evaluate_spline)(spline, phis) for spline in integrate_spline_list
         )
 
         return(np.array(out_list))
@@ -1036,6 +1052,9 @@ class ChiPhiFuncNull(ChiPhiFunc):
         if not hasattr(cls, 'instance'):
             cls.instance = ChiPhiFunc.__new__(cls)
         return cls.instance
+
+    def get_shape(self):
+        raise TypeError('Cannot use get_shape() on ChiPhiFuncNull.')
 
     # The contents is dummy to enable calling of this singleton using
     # the default constructor
@@ -1418,12 +1437,14 @@ def batch_ynp1_jit(v_source_A, v_source_B, v_rhs, rank_rhs, i_free, vai, ignore_
 #     a + rank_rhs - 1 = m
 # -- Output --
 # va: 2d matrix, content of ChiPhiFunc. Has #dim = rank_rhs
-@njit(complex128[:,:](complex128[:,:], complex128[:,:], int64), parallel=True)
-def batch_degen_jit(v_source_A, v_rhs, rank_rhs):
+@njit(complex128[:,:](complex128[:,:], complex128[:,:], complex128[:,:], int64), parallel=True)
+def batch_degen_jit(v_source_A, v_source_B, v_rhs, rank_rhs):
 #     if type(v_source_A) is not ChiPhiFunc or type(v_source_B) is not ChiPhiFunc:
 #         raise TypeError('batch_underdetermined_deconv: input should be ChiPhiFunc.')
     A_slices = np.ascontiguousarray(v_source_A.T) # now the axis 0 is phi grid
+    B_slices = np.ascontiguousarray(v_source_B.T) # now the axis 0 is phi grid
     v_rhs_slices = np.ascontiguousarray(v_rhs.T) # now the axis 0 is phi grid
+    dchi_matrix = np.ascontiguousarray(dchi_op(rank_rhs, False))
     # axis 0 is phi grid, axis 1 is chi mode
     va_transposed = np.zeros((len(A_slices), rank_rhs), dtype = np.complex128)
     if len(A_slices) != len(v_rhs_slices):
@@ -1432,7 +1453,9 @@ def batch_degen_jit(v_source_A, v_rhs, rank_rhs):
         raise ValueError('batch_underdetermined_deconv: #dim_A + rank_rhs - 1 = #dim_v_rhs must hold.')
     for i in prange(A_slices.shape[0]):
         A_conv_matrix_i = conv_matrix(A_slices[i], rank_rhs)
-        va_transposed[i, :] = solve_degenerate_jit(A_conv_matrix_i,v_rhs_slices[i])
+        B_conv_matrix_i = np.ascontiguousarray(conv_matrix(B_slices[i], rank_rhs))
+        total_matrix = A_conv_matrix_i + B_conv_matrix_i@dchi_matrix
+        va_transposed[i, :] = solve_degenerate_jit(total_matrix,v_rhs_slices[i])
     return va_transposed.T
 
 ''' IV. Solving linear PDE in phi grids '''
@@ -1711,7 +1734,7 @@ def fft_conv_op_batch(source):
 # -- Output --
 # y is a ChiPhiFunc's content
 def solve_integration_factor_chi(coeff, coeff_dp, coeff_dc, f, \
-    integral_mode=non_periodic_integral_mode, asymptotic_order=asymptotic_order):
+    integral_mode=two_pi_integral_mode, asymptotic_order=asymptotic_order):
 
     len_chi = f.shape[0]
     len_phi = f.shape[1]
@@ -1738,7 +1761,7 @@ def solve_integration_factor_chi(coeff, coeff_dp, coeff_dc, f, \
 # -- Output --
 # y is a ChiPhiFunc's content
 def solve_dphi_iota_dchi(iota, f, \
-    integral_mode=non_periodic_integral_mode, asymptotic_order=asymptotic_order):
+    integral_mode=two_pi_integral_mode, asymptotic_order=asymptotic_order):
     return(
         solve_integration_factor_chi(0, 1, iota, f, \
             integral_mode=integral_mode,
