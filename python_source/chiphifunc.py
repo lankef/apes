@@ -40,9 +40,9 @@ noise_level_periodic = 1e-10
 low_pass_freq=50
 
 # Default diff and integration modes can be modified.
-diff_mode = 'pseudo_spectral' # available: pseudo_spectral, finite_difference, fft, spline
-integral_mode = 'fft' # available: spline, simpson, fft
-two_pi_integral_mode = 'simpson' # available: spline, simpson, fft
+diff_mode = 'pseudo_spectral' # aYn_freelable: pseudo_spectral, finite_difference, fft, spline
+integral_mode = 'fft' # aYn_freelable: spline, simpson, fft
+two_pi_integral_mode = 'simpson' # aYn_freelable: spline, simpson, fft
 
 # Threshold for p amplitude to use asymptotic expansion for y'+py=f
 asymptotic_threshold = 30
@@ -457,6 +457,15 @@ class ChiPhiFunc:
         # static methods used for evaluation.
         return(self.content.shape)
 
+    def mask_constant(self):
+        if self.get_shape()[0]%2!=1:
+            raise ValueError('Only even order coeffs have constant components')
+        new_content = self.content.copy()
+        new_content[len(new_content)//2] = np.zeros(new_content.shape[1])
+        return(ChiPhiFunc(new_content))
+
+
+
     # Returns the constant component.
     def get_constant(self):
         len_chi = self.get_shape()[0]
@@ -787,114 +796,108 @@ class ChiPhiFunc:
         return(util_matrix)
 
     ''' I.1.8 Deconvolution ("dividing" chi-dependent terms) '''
+
+    def get_O_O_einv_from_A_B(chiphifunc_A, chiphifunc_B, i_free, rank_rhs):
+
+        if not (type(chiphifunc_A) is ChiPhiFunc\
+            and type(chiphifunc_B) is ChiPhiFunc):
+            raise TypeError('Both of chiphifunc_A, chiphifunc_B '\
+                            'should be ChiPhiFunc. The actual types are:'
+                            +str(type(chiphifunc_A))+', '
+                            +str(type(chiphifunc_B)))
+
+        chiphifunc_A_content, chiphifunc_B_content = chiphifunc_A.stretch_phi_to_match(chiphifunc_B)
+
+        # generate the LHS operator O_matrices = (va conv + vb conv dchi)
+        O_matrices = 0
+        A_conv_matrices = conv_tensor(chiphifunc_A_content, rank_rhs+1)
+        O_matrices += A_conv_matrices
+
+        dchi_matrix = dchi_op(rank_rhs+1, False)
+        B_conv_matrices = conv_tensor(chiphifunc_B_content, rank_rhs+1)
+        O_matrices += np.einsum('ijk,jl->ilk',B_conv_matrices,dchi_matrix)
+
+        O_einv = tensor_inv_square_excluding_col(O_matrices, i_free)
+        O_einv = np.concatenate((O_einv[:i_free], np.zeros((1,O_einv.shape[1],O_einv.shape[2])), O_einv[i_free:]))
+        return(O_matrices, O_einv)
+
+
     # Solve under-determined degenerate system equivalent
-    # v_source_A(chi, phi) * va_{n+1}(chi, phi) = v_rhs{n}(chi, phi).
+    # chiphifunc_A(chi, phi) * y_{n+1}(chi, phi) = chiphifunc_rhs{n}(chi, phi).
     # When Y_mode=True, solves
     # wrapper for jit-enabled method batch_underdetermined_degen_jit.
     # Necessary because the equation for Yn's outmost components exactly cancel.
     # -- Input --
-    # v_source_A, v_rhs: ChiPhiFunc,
+    # chiphifunc_A (must be provided), chiphifunc_B, chiphifunc_rhs: ChiPhiFunc,
+    # chiphifunc_B can be nan.
     # rank_rhs: int, 'n' in the equation above
     # i_free: int, index of free var in va,
-    # vai: ChiPhiFunc with a single row, value of free component.
-    def solve_underdet_degen(v_source_A, v_source_B, v_rhs, rank_rhs, i_free, vai,
-        Y_mode = False, ignore_extra=False):
-        # Checking input validity
-        if type(v_source_A) is not ChiPhiFunc\
-            or type(v_source_B) is not ChiPhiFunc\
-            or type(v_rhs) is not ChiPhiFunc:
-            raise TypeError('ChiPhiFunc.solve_underdetermined: '\
-                            'v_source_A, v_rhs, should all be '\
-                            'ChiPhiFunc. The actual types are:'
-                            +str(type(v_source_A))+', '
-                            +str(type(v_rhs)))
+    # Yn_free: ChiPhiFunc with a single row, value of free component.
+    def solve_A_B_dchi_y(chiphifunc_A, chiphifunc_B, chiphifunc_rhs, rank_rhs, Yn_free):
+        # Checking input types
+        if not (type(chiphifunc_rhs) is ChiPhiFunc):
+            raise TypeError('chiphifunc_rhs should be ChiPhiFunc. The actual types are:'
+                            +str(type(chiphifunc_rhs)))
 
-        v_source_A_content, v_source_B_content = v_source_A.stretch_phi_to_match(v_source_B)
-        v_source_A_content, v_rhs_content = v_source_A.stretch_phi_to_match(v_rhs)
+        chiphifunc_A_content, chiphifunc_rhs_content = chiphifunc_A.stretch_phi_to_match(chiphifunc_rhs)
+        chiphifunc_A = ChiPhiFunc(chiphifunc_A_content)
+        len_chi = chiphifunc_rhs.get_shape()[0]
 
-        if type(vai) is not ChiPhiFunc:
-            if np.isscalar(vai):
-                vai_content = np.full((1,v_source_A_content.shape[1]),vai, dtype=np.complex128)
+        # Convertin constant Yn_free to ChiPhiFunc
+        if type(Yn_free) is not ChiPhiFunc:
+            if np.isscalar(Yn_free):
+                Yn_free_content = np.full((1,chiphifunc_A_content.shape[1]),Yn_free,dtype=np.complex128)
             else:
                 raise TypeError('ChiPhiFunc.solve_underdetermined: '\
-                                'vai is not scalar ChiPhiFunc. '\
-                                'The actual type is: '+str(type(vai)))
+                                'Yn_free is not scalar ChiPhiFunc. '\
+                                'The actual type is: '+str(type(Yn_free)))
         else:
-            vai_content = vai.content
+            Yn_free_content = Yn_free.content
 
-        # Center-pad v_rhs if it's too short
-        if v_source_A.get_shape()[0] + rank_rhs != v_rhs.get_shape()[0]:
-            # warnings.warn('Warning: A, v_rhs and rank_rhs doesn\'t satisfy mode'
+        # Center-pad chiphifunc_rhs if it's too short
+        if chiphifunc_A.get_shape()[0] + rank_rhs != len_chi:
+            # warnings.warn('Warning: A, chiphifunc_rhs and rank_rhs doesn\'t satisfy mode'
             #               ' number requirements. Zero-padding rhs chi components.'+
-            #               ' v_source_A shape=' + str(v_source_A.get_shape()) +
-            #               ', _rhs shape=' + str(v_rhs.get_shape()) +
+            #               ' chiphifunc_A shape=' + str(chiphifunc_A.get_shape()) +
+            #               ', _rhs shape=' + str(chiphifunc_rhs.get_shape()) +
             #               ', rank_rhs=' + str(rank_rhs))
-             # This creates a padded content for v_rhs in case some components are zero. However, we still need to put in check for
+             # This creates a padded content for chiphifunc_rhs in case some components are zero. However, we still need to put in check for
              # LHS and RHS's even and oddness.
-            v_rhs_content = ChiPhiFunc.add_jit(\
-                v_rhs_content,\
-                np.zeros((v_source_A.get_shape()[0]+rank_rhs, v_rhs.get_shape()[1]), dtype=np.complex128),\
+            chiphifunc_rhs_content = ChiPhiFunc.add_jit(\
+                chiphifunc_rhs_content,\
+                np.zeros((chiphifunc_A.get_shape()[0]+rank_rhs, chiphifunc_rhs.get_shape()[1]), dtype=np.complex128),\
                 1 # Sign is 1
             )
 
-        if Y_mode:
-            va_content = batch_ynp1_jit(
-                v_source_A_content,
-                v_source_B_content,
-                v_rhs_content,
-                rank_rhs,
-                i_free,
-                vai_content, ignore_extra=ignore_extra
-            )
+        i_free = (rank_rhs+1)//2 # location of Yn0 or Yn1p
+        O_matrices, O_einv = ChiPhiFunc.get_O_O_einv_from_A_B(chiphifunc_A, chiphifunc_B, i_free, rank_rhs)
+        O_free_col = O_matrices[:,i_free,:]
+        vector_free_coef = np.einsum('ijk,jk->ik',O_einv, O_free_col)#A_einv@A_free_col
+        vector_free_coef[i_free] = -np.ones((vector_free_coef.shape[1]))
+
+        if chiphifunc_rhs_content.shape[0]%2!=0: # at odd orders (ODE exists)
+            # The rest of the procedure is carried out normally with
+            # i_free pointing at Yn1p. The resulting Yn should be
+            # Yn = (A_einv@np.ascontiguousarray(chiphifunc_rhs) - Yn1p * vector_free_coef)[:n_dim]
+            # where vector_free_coef is a vector. This gives Yn1n = Yn1n and
+            #
+            # Yn1n = Yn[i_1n] = (A_einv@chiphifunc_rhs - Yn1p * vector_free_coef)[i_1n]
+            # = A_einv[i_1n]@chiphifunc_rhs - Yn1p * vector_free_coef[i_1n]
+            #
+            # Therefore,
+            #                                           Yn1n + Yn1p = Yn_free is equivalent to
+            # A_einv[i_1n]@chiphifunc_rhs - Yn1p * vector_free_coef[i_1n] + Yn1p = Yn_free
+            # A_einv[i_1n]@chiphifunc_rhs - Yn1p * (vector_free_coef[i_1n]-1) = Yn_free
+            # A_einv[i_1n]@chiphifunc_rhs - Yn_free = Yn1p * (vector_free_coef[i_1n]-1)
+            # (A_einv[i_1n]@chiphifunc_rhs - Yn_free)/(vector_free_coef[i_1n]-1) = Yn1p
+            # i_1n is shifted by the padding
+            i_1n = i_free-1 # Index of Yn1n (or if n is even, Yn2_n)
+            vec_free = (np.einsum('ik,ik->k',O_einv[i_1n],chiphifunc_rhs_content) - Yn_free_content)/(vector_free_coef[i_1n]-1)
         else:
-            va_content = batch_underdetermined_degen_jit(
-                v_source_A_content,
-                v_rhs_content,
-                rank_rhs,
-                i_free,
-                vai_content, ignore_extra=ignore_extra
-            )
+            vec_free = Yn_free_content
 
-        return(ChiPhiFunc(va_content))
-
-    # Solve exactly determined degenerate system equivalent to
-    # v_source_A(chi, phi) * va_{n}(chi, phi) = v_rhs{n}(chi, phi).
-    # You can also think of this as "/" with chi-dependent "other" argument.
-    # wrapper for jit-enabled method batch_degen_jit.
-    def solve_degen(v_source_A, v_source_B, v_rhs, rank_rhs):
-
-        # checking input types
-        if type(v_source_A) is not ChiPhiFunc\
-            or type(v_source_B) is not ChiPhiFunc\
-            or type(v_rhs) is not ChiPhiFunc:
-            raise TypeError('ChiPhiFunc.solve_underdetermined: '\
-                            'v_source_A, v_rhs, vai should all be ChiPhiFunc.')
-
-
-        v_source_A_content = v_source_A.content
-        v_source_B_content = v_source_B.content
-        v_rhs_content = v_rhs.content
-        if v_source_A.get_shape()[0] + rank_rhs - 1 != v_rhs.get_shape()[0]:
-            print("v_source_A shape:", v_source_A.get_shape())
-            print("v_rhs shape:", v_rhs.get_shape())
-            print("rank_rhs:", rank_rhs)
-            warnings.warn('Warning: A, v_rhs and rank_rhs doesn\'t satisfy mode'
-                          ' number requirements. Zero-padding rhs chi components.')
-            # This creates a padded content for v_rhs in case some components are zero. However, we still need to put in check for
-            # LHS and RHS's even and oddness.
-            v_rhs_content = ChiPhiFunc.add_jit(
-                v_rhs_content,
-                np.zeros((v_source_A.get_shape()[0]+rank_rhs-1, v_rhs.get_shape()[1]), dtype=np.complex128),
-                1
-            )
-
-        va_content = batch_degen_jit(
-            v_source_A.content,
-            v_source_B.content,
-            v_rhs.content,
-            rank_rhs
-        )
-        return(ChiPhiFunc(va_content))
+        Yn = (np.einsum('ijk,jk->ik',O_einv,chiphifunc_rhs_content) - vec_free * vector_free_coef)
+        return(ChiPhiFunc(Yn))
 
 ''' I.2 Utilities '''
 # Integrates a function on a grid using Simpson's method.
@@ -1106,6 +1109,9 @@ class ChiPhiFuncNull(ChiPhiFunc):
     def dphi(self, order=1):
         return(self)
 
+    def get_constant(self):
+        raise TypeError('Cannot get constant of a ChiPhiFuncNull.')
+
 ''' III. Grid 1D deconvolution (used for "dividing" a chi-dependent quantity)'''
 # This part solves the pointwise product function problem A*va = B*vb woth unknown va.
 # by chi mode matching. It treats both pointwise products as matrix
@@ -1123,90 +1129,27 @@ class ChiPhiFuncNull(ChiPhiFunc):
 # matrices.
 # Codes written in this part are specifically for 1D deconvolution used for ChiPhiFunc.
 
-''' III.1 va, vb with the same number of dimensions '''
-# Invert an (n,n) submatrix of a (m>n,n) rectangular matrix by taking the first
-# n rows. "Taking the first n rows" is motivated by the RHS being rank n.
-#
-# -- Input --
-# (m,n) matrix A
-#
-# -- Return --
-# (m,m) matrix A_inv
-@njit(complex128[:,:](complex128[:,:]))
-def inv_square_jit(in_matrix):
-    if in_matrix.ndim != 2:
-        raise ValueError("Input should be 2d array")
-
-    n_row = in_matrix.shape[0]
-    n_col = in_matrix.shape[1]
-    if n_row<=n_col:
-        raise ValueError("Input should have more rows than cols")
-
-    # Remove specfied column (slightly faster than delete)
-    # and remove extra rows
-    sqinv = np.linalg.inv(in_matrix[:n_col, :])
-
-    padded = np.zeros((n_row, n_row), dtype = np.complex128)
-    padded[:len(sqinv), :len(sqinv)] = sqinv
-    return(padded)
-
-# Solve degenerate underdetermined equation system A@va = B@vb, where A, B
-# are (m,n+1) (m,n) matrices (m>n+1) of rank n, vb is a n-dim vector, and
-# va is an n+1-dim vector with a free element vai at i.
-#
-# -- Input --
-# (m,n+1), (m,n), rank-n 2d np arrays A, B
-# n-dim np array-like vb
-# or
-# (m,n+1), rank n+1 A,
-# m-dim np array-like v_rhs
-#
-# vb can be any array-like item, and is not necessarily 1d.
-# Implemented with ChiPhiFunc in mind.
-#
-# -- Return --
-# n+1 np array-like va
-#
-# -- Note --
-# For recursion relations with ChiPhiFunc's, A should come from
-# convolution matrices. That still needs implementation.
-@njit(complex128[:](complex128[:,:], complex128[:]))
-def solve_degenerate_jit(A, v_rhs):
-    n_dim = A.shape[1]
-    if A.shape[0] != v_rhs.shape[0]:
-        raise ValueError("solve_underdetermined: A, v_rhs must have the same number of rows")
-    A_inv = np.ascontiguousarray(inv_square_jit(A))
-    # This vector is actually m-dim, with m-n blank elems at the end.
-    va = (A_inv@np.ascontiguousarray(v_rhs))[:n_dim]
-    return(va)
-
-# @njit(complex128[:](complex128[:,:], complex128[:,:], complex128[:]))
-# def solve_degenerate_jit(A, B, vb):
-#     B_cont = np.ascontiguousarray(B)
-#     vb_cont = np.ascontiguousarray(vb)
-#     return(solve_degenerate_jit(A, B_cont@vb_cont))
-
 ''' III.2 va has 1 more component than vb '''
 # Invert an (n,n) submatrix of a (m>n+1,n+1) rectangular matrix by taking the first
 # n-1 rows and excluding the ind_col'th column. "Taking the first n rows" is motivated
 # by the RHS being rank n-1
 #
 # -- Input --
-# (m,n+1) matrix A
+# (m,n+1,len_phi) matrix A
 # ind_col < n+1
 #
 # -- Return --
-# (m,m) matrix A_inv
-@njit(complex128[:,:](complex128[:,:], int64))
-def inv_square_excluding_col_jit(in_matrix, ind_col):
-    if (in_matrix.shape[0] - in_matrix.shape[1])%2!=1:
+# (m,m,len_phi) matrix A_inv
+def tensor_inv_square_excluding_col(in_matrices, ind_col):
+    if (in_matrices.shape[0] - in_matrices.shape[1])%2==0:
         raise AttributeError('This method takes rows from the middle. The array'\
-        'shape must have an even difference between row and col numbers.')
-    if in_matrix.ndim != 2:
-        raise ValueError("Input should be 2d array")
-
-    n_row = in_matrix.shape[0]
-    n_col = in_matrix.shape[1]
+        'shape must have an odd difference between row and col numbers.')
+    if in_matrices.ndim != 3:
+        raise ValueError("Input should be 3d array")
+    n_row = in_matrices.shape[0]
+    n_col = in_matrices.shape[1]
+    n_phi = in_matrices.shape[2]
+    n_clip = (n_row-n_col+1)//2 # How much is the transposed array larger than Yn
     if n_row<=n_col:
         raise ValueError("Input should have more rows than cols")
 
@@ -1216,78 +1159,19 @@ def inv_square_excluding_col_jit(in_matrix, ind_col):
     # Remove specfied column (slightly faster than delete)
     # and remove extra rows (take n_col-1 rows from the center)
     rows_to_remove = (n_row-(n_col-1))//2
-    sub = in_matrix[:,np.arange(in_matrix.shape[1])!=ind_col][rows_to_remove:-rows_to_remove, :]
+    sub = in_matrices[:,np.arange(in_matrices.shape[1])!=ind_col,:][rows_to_remove:-rows_to_remove, :, :]
+    sub = np.moveaxis(sub,2,0)
     sqinv = np.linalg.inv(sub)
-    padded = np.zeros((n_row, n_row), dtype = np.complex128)
-    padded[rows_to_remove:-rows_to_remove, rows_to_remove:-rows_to_remove] = sqinv
-    return(padded)
-
-# Solve degenerate underdetermined equation system A@va = B@vb, where A, B
-# are (m,n+1) (m,n) matrices (m>n+1) of rank n, vb is a n-dim vector, and
-# va is an n+1-dim vector with a free element vai at i.
-#
-# -- Input --
-# (m,n+1), (m,n), rank-n 2d np arrays A, B
-# n-dim np array-like vb
-# or
-# (m,n+1), rank n+1 A,
-# m-dim np array-like v_rhs
-#
-# vb can be any array-like item, and is not necessarily 1d.
-# Implemented with ChiPhiFunc in mind.
-#
-# -- Return --
-# n+1 np array-like va
-#
-# -- Note --
-# For recursion relations with ChiPhiFunc's, A and B should come from
-# convolution matrices. That still needs implementation.
-# When Y_mode=True, vai is the sum between the center two elements.
-# (A must have an even number of rows)
-# (Yn1p + Yn1n = Yn1c = Y11s * sigma_twiddle_n)
-@njit(complex128[:](complex128[:,:], complex128[:], int64, complex128, boolean))
-def solve_degenerate_underdetermined_jit(A, v_rhs, i_free, vai, Y_mode=False):
-    n_dim = A.shape[1]-1 # #dim of vb, which is #dim_va-1. vb is v_rhs before the convolution
-    if Y_mode:
-        # if A.shape[1]%2!=0:
-        #     warnings.warn('Warning: Y_mode=True on even order. vai should be Yn0')
-        i_1p = A.shape[1]//2   # Index of Yn1p (or if n is even, Yn0)
-        i_1n = A.shape[1]//2-1 # Index of Yn1n (or if n is even, Yn2_n)
-        i_free = i_1p # set Yn1p as free var
-    if A.shape[0] != v_rhs.shape[0]:
-        raise ValueError("solve_underdetermined: A, v_rhs must have the same number of rows")
-    A_einv = np.ascontiguousarray(inv_square_excluding_col_jit(A, i_free))
-    A_free_col = np.ascontiguousarray(A.T[i_free])
-    v_rhs = np.ascontiguousarray(v_rhs)
-    va_free_coef = (A_einv@A_free_col)
-    clip_n = (A.shape[0]-n_dim)//2 # How much is the transposed array larger than Yn
-    # This vector is actually m-dim, with m-n blank elems at the end.
-    if Y_mode and A.shape[1]%2==0: # Y_mode=True and on odd order (ODE exists)
-        # The rest of the procedure is carried out normally with
-        # i_free pointing at Yn1n. The resulting Yn should be
-        # Yn = (A_einv@np.ascontiguousarray(v_rhs) - Yn1n * va_free_coef)[:n_dim]
-        # where va_free_coef is a vector. This gives Yn1n = Yn1n and
-        #
-        # Yn1p = Yn[i_1p] = (A_einv@v_rhs - Yn1n * va_free_coef)[i_1p]
-        # = A_einv[i_1p]@v_rhs - Yn1n * va_free_coef[i_1p]
-        #
-        # Therefore,
-        # Yn1p+Yn1n=vai is equivalent to
-        # A_einv[i_1n]@v_rhs - Yn1p * va_free_coef[i_1n] + Yn1n = vai
-        # A_einv[i_1n]@v_rhs - Yn1p * (va_free_coef[i_1n]-1) = vai
-        # A_einv[i_1n]@v_rhs - vai = Yn1p * (va_free_coef[i_1n]-1)
-        # (A_einv[i_1n]@v_rhs - vai)/(va_free_coef[i_1n]-1) = Yn1p
-        # i_1n is shifted by the padding
-        vai = (A_einv[clip_n+i_1n]@v_rhs - vai)/(va_free_coef[clip_n+i_1n]-1)
-    Yn = (A_einv@v_rhs - vai * va_free_coef)
-    Yn = Yn[clip_n:-clip_n]
-    return(np.concatenate((Yn[:i_free], np.array([vai]) , Yn[i_free:])))
+    sqinv = np.moveaxis(sqinv,0,2)
+    padded = np.zeros((n_row, n_row, n_phi), dtype = np.complex128)
+    padded[rows_to_remove:-rows_to_remove, rows_to_remove:-rows_to_remove,:] = sqinv
+    return(padded[n_clip:-n_clip])
 
 # @njit(complex128[:](complex128[:,:], complex128[:,:], complex128[:], int64, complex128))
-# def solve_degenerate_underdetermined_jit(A, B, vb, i_free, vai):
+# def solve_degenerate_underdetermined_jit(A, B, vb, i_free, Yn_free):
 #     B_cont = np.ascontiguousarray(B)
 #     vb_cont = np.ascontiguousarray(vb)
-#     return(solve_degenerate_underdetermined_jit(A, B_cont@vb_cont, i_free, vai))
+#     return(solve_degenerate_underdetermined_jit(A, B_cont@vb_cont, i_free, Yn_free))
 
 ''' III.3 Convolution operator generator and ChiPhiFunc.content numba wrapper '''
 # Generate convolution operator from a for an n_dim vector.
@@ -1299,7 +1183,19 @@ def conv_matrix(vec, n_dim):
         out_transposed[i, i:i+len(vec)] = vec
     return(out_transposed.T)
 
-# The first
+# Generate a tensor convolving a ChiPhiFunc content with n_dim chi modes.
+# The convolution is done by:
+# x2_conv_y2 = np.einsum('ijk,jk->ik',conv_x2, y2.content)
+@njit(complex128[:,:,:](complex128[:,:], int64))
+def conv_tensor(content, n_dim):
+    len_chi = content.shape[0]
+    len_phi = content.shape[1]
+    out = np.zeros((len_chi+n_dim-1,n_dim,len_phi), dtype = np.complex128)
+    for i in prange(n_dim):
+        out[i:i+len_chi, i, :] = content
+    return(out)
+
+# The first finite differene implementation
 @njit(complex128[:,:](complex128[:], int64))
 def finite_diff_matrix(stencil, n_dim):
     if len(stencil)%2!=1 or len(stencil.shape)!=1:
@@ -1313,23 +1209,16 @@ def finite_diff_matrix(stencil, n_dim):
         out_transposed[i] = np.roll(first_row, i)
     return(out_transposed.T)
 
-
-@njit(float64[:,:](float64[:], int64))
-def conv_matrix_re(vec, n_dim):
-    out_transposed = np.zeros((n_dim,len(vec)+n_dim-1), dtype = np.float64)
-    for i in prange(n_dim):
-        out_transposed[i, i:i+len(vec)] = vec
-    return(out_transposed.T)
-
-# For solving a*va = v_rhs, where va, vb have the same number of dimensions.
+# For solving (va+vb dchi)x = rhs, where va, vb have the same number of chi modes.
 # In the context below, "#dim" represents number of chi mode components.
 # Note: "vector" means a series of chi coefficients in this context.
 #
 # -- Input --
-# v_source_A: 2d matrix, content of ChiPhiFunc, #dim = a
-# v_rhs: 2d matrix, content of ChiPhiFunc. Should be #dim = m vector
+# chiphifunc_A: (?, len_chi, len_phi)
+# chiphifunc_B: (?, len_chi, len_phi)
+# chiphifunc_rhs: 2d matrix, content of ChiPhiFunc. Should be #dim = m vector
 #     produced by convolution of a #dim = rank_rhs vector.
-# rank_rhs: int, rank of v_rhs.
+# rank_rhs: int, rank of chiphifunc_rhs.
 #     Think of the problem A@va = B@vb, where
 #     A and B are convolution matrices with the same row number.
 #     n_dim_rhs is the dimensionality of vb. In a recursion relation,
@@ -1338,125 +1227,12 @@ def conv_matrix_re(vec, n_dim):
 #     a + #dim_va - 1 = m
 #     a + (rank_rhs+1) - 1 = m
 # i_free: int, the index of va's free element. Note that #dim_va = rank_rhs + 1.
-# vai:  2d matrix with a single row, content of ChiPhiFunc
+# Yn_free:  2d matrix with a single row, content of ChiPhiFunc
 #    represents a function of only phi given on grid.
 #
 # -- Output --
 # va: 2d matrix, content of ChiPhiFunc. Has #dim = rank_rhs+1.
-@njit(complex128[:,:](complex128[:,:], complex128[:,:], int64, int64, complex128[:,:], boolean), parallel=True)
-def batch_underdetermined_degen_jit(v_source_A, v_rhs, rank_rhs, i_free, vai, ignore_extra):
 
-    # Checking dimensionality
-    if len(v_source_A) + rank_rhs != len(v_rhs):
-        if len(v_source_A) + rank_rhs < len(v_rhs):
-            num_extra = (len(v_rhs) - (len(v_source_A) + rank_rhs))//2
-            # ignoring extra component is allowed and extra components are small
-            # Can't have an even number of extra components
-            # Checking extra components' size
-            if ignore_extra\
-                and (len(v_rhs) - (len(v_source_A) + rank_rhs))%2==0\
-                and max_log10(v_rhs[:num_extra]) < max_log10(v_rhs[num_extra:-num_extra]) - noise_order_solve\
-                and max_log10(v_rhs[-num_extra:]) < max_log10(v_rhs[num_extra:-num_extra]) - noise_order_solve:
-                v_rhs = v_rhs[num_extra:-num_extra]
-            else:
-                raise ValueError('batch_underdetermined_deconv: #dim_A + rank_rhs < #dim'\
-                    '_v_rhs.')
-        else:
-            raise ValueError('batch_underdetermined_deconv: #dim_A + rank_rhs > #dim'\
-                '_v_rhs.')
-
-    A_slices = np.ascontiguousarray(v_source_A.T) # now the axis 0 is phi grid
-    v_rhs_slices = np.ascontiguousarray(v_rhs.T) # now the axis 0 is phi grid
-    # axis 0 is phi grid, axis 1 is chi mode
-    va_transposed = np.zeros((len(A_slices), rank_rhs+1), dtype = np.complex128)
-    if len(A_slices) != len(v_rhs_slices):
-        raise ValueError('batch_underdetermined_deconv: A, v_rhs must have the same number of phi grids.')
-    for i in prange(A_slices.shape[0]):
-        A_conv_matrix_i = conv_matrix(A_slices[i], rank_rhs+1)
-        va_transposed[i, :] = solve_degenerate_underdetermined_jit(A_conv_matrix_i,\
-                                         v_rhs_slices[i], i_free, np.ravel(vai)[i], False)
-    return va_transposed.T
-
-# Modification of batch_underdetermined_degen_jit for solving (conv(a) + conv(b)@dchi)@Yn+1 = RHS - LHS(Yn+1 = 0).
-#@njit(complex128[:,:](complex128[:,:], complex128[:,:], complex128[:,:], int64, int64, complex128[:,:]), parallel=True)
-@njit(complex128[:,:](complex128[:,:], complex128[:,:], complex128[:,:], int64, int64, complex128[:,:], boolean), parallel=True)
-def batch_ynp1_jit(v_source_A, v_source_B, v_rhs, rank_rhs, i_free, vai, ignore_extra):
-
-    # Checking dimensionality
-    if len(v_source_A) + rank_rhs != len(v_rhs):
-        if len(v_source_A) + rank_rhs < len(v_rhs):
-            num_extra = (len(v_rhs) - (len(v_source_A) + rank_rhs))//2
-            # ignoring extra component is allowed and extra components are small
-            # Can't have an even number of extra components
-            # Checking extra components' size
-            if ignore_extra\
-                and (len(v_rhs) - (len(v_source_A) + rank_rhs))%2==0\
-                and max_log10(v_rhs[:num_extra]) < max_log10(v_rhs[num_extra:-num_extra]) - noise_order_solve\
-                and max_log10(v_rhs[-num_extra:]) < max_log10(v_rhs[num_extra:-num_extra]) - noise_order_solve:
-                v_rhs = v_rhs[num_extra:-num_extra]
-            else:
-                print('#dim_A, rank_rhs, #dim_v_rhs:', len(v_source_A), rank_rhs, len(v_rhs))
-                raise ValueError('batch_underdetermined_deconv: #dim_A + rank_rhs < #dim'\
-                    '_v_rhs.')
-        else:
-            print('#dim_A, rank_rhs, #dim_v_rhs:', len(v_source_A), rank_rhs, len(v_rhs))
-            raise ValueError('batch_underdetermined_deconv: #dim_A + rank_rhs > #dim'\
-                '_v_rhs.')
-
-    A_slices = np.ascontiguousarray(v_source_A.T) # now the axis 0 is phi grid
-    B_slices = np.ascontiguousarray(v_source_B.T) # now the axis 0 is phi grid
-    v_rhs_slices = np.ascontiguousarray(v_rhs.T) # now the axis 0 is phi grid
-    # axis 0 is phi grid, axis 1 is chi mode
-    va_transposed = np.zeros((len(A_slices), rank_rhs+1), dtype = np.complex128)
-    if len(A_slices) != len(v_rhs_slices):
-        raise ValueError('batch_underdetermined_deconv: A, v_rhs must have the same number of phi grids.')
-
-    # generate dchi operators
-    dchi_matrix = np.ascontiguousarray(dchi_op(rank_rhs+1, False))
-    for i in prange(A_slices.shape[0]): # Loop for each point in the phi grid
-        # For Yn1, these are (rank_rhs+1+1,rank_rhs+1) because a and b are (2,n_grid) matrices.
-        A_conv_matrix_i = conv_matrix(A_slices[i], rank_rhs+1)
-        B_conv_matrix_i = np.ascontiguousarray(conv_matrix(B_slices[i], rank_rhs+1))
-        total_matrix = A_conv_matrix_i + B_conv_matrix_i@dchi_matrix
-        va_transposed[i, :] = solve_degenerate_underdetermined_jit(total_matrix,\
-                                         v_rhs_slices[i], 0, np.ravel(vai)[i], True)
-    return va_transposed.T
-
-# For solving a*va = v_rhs, where va, vb have the same number of dimensions.
-# In the context below, "#dim" represents number of chi mode components.
-#
-# -- Input --
-# v_source_A: 2d matrix, content of ChiPhiFunc, #dim = a
-# v_rhs: 2d matrix, content of ChiPhiFunc, #dim = m
-# rank_rhs: int, rank of v_rhs.
-#     Think of the problem A@va = B@vb, where
-#     A and B are convolution matrices with the same row number.
-#     n_dim_rhs is the dimensionality of vb. In a recursion relation,
-#     this represents the highest mode number appearing in RHS.
-#     The following relation must be satisfied:
-#     a + rank_rhs - 1 = m
-# -- Output --
-# va: 2d matrix, content of ChiPhiFunc. Has #dim = rank_rhs
-@njit(complex128[:,:](complex128[:,:], complex128[:,:], complex128[:,:], int64), parallel=True)
-def batch_degen_jit(v_source_A, v_source_B, v_rhs, rank_rhs):
-#     if type(v_source_A) is not ChiPhiFunc or type(v_source_B) is not ChiPhiFunc:
-#         raise TypeError('batch_underdetermined_deconv: input should be ChiPhiFunc.')
-    A_slices = np.ascontiguousarray(v_source_A.T) # now the axis 0 is phi grid
-    B_slices = np.ascontiguousarray(v_source_B.T) # now the axis 0 is phi grid
-    v_rhs_slices = np.ascontiguousarray(v_rhs.T) # now the axis 0 is phi grid
-    dchi_matrix = np.ascontiguousarray(dchi_op(rank_rhs, False))
-    # axis 0 is phi grid, axis 1 is chi mode
-    va_transposed = np.zeros((len(A_slices), rank_rhs), dtype = np.complex128)
-    if len(A_slices) != len(v_rhs_slices):
-        raise ValueError('batch_underdetermined_deconv: A, v_rhs must have the same number of phi grids.')
-    if len(v_source_A) + rank_rhs - 1 != len(v_rhs):
-        raise ValueError('batch_underdetermined_deconv: #dim_A + rank_rhs - 1 = #dim_v_rhs must hold.')
-    for i in prange(A_slices.shape[0]):
-        A_conv_matrix_i = conv_matrix(A_slices[i], rank_rhs)
-        B_conv_matrix_i = np.ascontiguousarray(conv_matrix(B_slices[i], rank_rhs))
-        total_matrix = A_conv_matrix_i + B_conv_matrix_i@dchi_matrix
-        va_transposed[i, :] = solve_degenerate_jit(total_matrix,v_rhs_slices[i])
-    return va_transposed.T
 
 ''' IV. Solving linear PDE in phi grids '''
 
